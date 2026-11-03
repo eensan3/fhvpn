@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="${OPENCONNECT_SSO_PYTHON:-$HOME/.local/pipx/venvs/openconnect-sso/bin/python}"
+exec "$PYTHON" "$ROOT/fhvpn_sso_body.py" "$@"

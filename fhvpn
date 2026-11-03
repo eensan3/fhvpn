@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# OpenConnect SSO wrapper (Cisco AnyConnect compatible)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+LOCAL_CFG="$ROOT/config.local"
+OPENCONNECT_SSO="${OPENCONNECT_SSO:-$ROOT/fhvpn-sso}"
+OC_CONFIG="$HOME/.config/openconnect-sso/config.toml"
+export VPN_BROWSER="${VPN_BROWSER:-firefox}"
+
+load_local_config() {
+  if [[ ! -f "$LOCAL_CFG" ]]; then
+    echo "Missing $LOCAL_CFG" >&2
+    echo "Copy config.local.example → config.local and fill VPN_SERVER / VPN_USER" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$LOCAL_CFG"
+  VPN_SERVER="${VPN_SERVER:-}"
+  VPN_IP="${VPN_IP:-}"
+  AUTHGROUP="${VPN_AUTHGROUP:-}"
+  VPN_USER="${VPN_USER:-}"
+
+  if [[ -z "$VPN_SERVER" ]]; then
+    echo "VPN_SERVER is empty in $LOCAL_CFG" >&2
+    exit 1
+  fi
+}
+
+usage() {
+  cat <<EOF
+Usage: fhvpn [connect|auth|disconnect|setup-creds]
+
+  connect       SSO login + VPN tunnel (default)
+  auth          SSO login only, print shell vars for manual openconnect
+  disconnect    Kill openconnect process
+  setup-creds   Save password to Keychain (email from config.local)
+
+Browser (VPN_BROWSER): firefox | safari | webengine
+
+First run:
+  cp config.local.example config.local   # edit values
+  ./fhvpn setup-creds   # optional
+  ./fhvpn
+EOF
+}
+
+host_resolves() {
+  python3 - <<PY >/dev/null 2>&1
+import socket
+socket.getaddrinfo("${VPN_SERVER}", 443)
+PY
+}
+
+ensure_dns() {
+  if host_resolves; then
+    return 0
+  fi
+  if [[ -z "${VPN_IP:-}" ]]; then
+    echo "DNS does not resolve ${VPN_SERVER}; set VPN_IP in config.local" >&2
+    return 0
+  fi
+  if grep -q "[[:space:]]${VPN_SERVER}\([[:space:]]\|$\)" /etc/hosts 2>/dev/null; then
+    return 0
+  fi
+  echo "DNS does not resolve ${VPN_SERVER}, adding ${VPN_IP} to /etc/hosts..." >&2
+  printf '%s %s\n' "$VPN_IP" "$VPN_SERVER" | sudo tee -a /etc/hosts >/dev/null
+}
+
+get_username() {
+  if [[ -n "${VPN_USER:-}" ]]; then
+    echo "$VPN_USER"
+    return
+  fi
+  grep '^username' "$OC_CONFIG" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/' | head -1
+}
+
+browser_mode() {
+  case "${VPN_BROWSER}" in
+    hidden) echo hidden ;;
+    *) echo shown ;;
+  esac
+}
+
+build_sso_args() {
+  # sets global array SSO_ARGS
+  SSO_ARGS=(-s "$VPN_SERVER" --browser-display-mode "$(browser_mode)")
+  if [[ -n "${AUTHGROUP:-}" ]]; then
+    SSO_ARGS+=(--authgroup "$AUTHGROUP")
+  fi
+  local user
+  user="$(get_username)"
+  if [[ -n "$user" ]]; then
+    SSO_ARGS+=(-u "$user")
+  fi
+}
+
+cmd_connect() {
+  load_local_config
+  ensure_dns
+  build_sso_args
+  exec "$OPENCONNECT_SSO" "${SSO_ARGS[@]}" "$@"
+}
+
+cmd_auth() {
+  load_local_config
+  ensure_dns
+  build_sso_args
+  "$OPENCONNECT_SSO" --authenticate shell "${SSO_ARGS[@]}"
+}
+
+cmd_disconnect() {
+  if pgrep -x openconnect >/dev/null; then
+    sudo pkill -x openconnect
+    echo "VPN disconnected."
+  else
+    echo "openconnect is not running."
+  fi
+}
+
+case "${1:-connect}" in
+  connect|up)
+    shift || true
+    cmd_connect "$@"
+    ;;
+  auth|login)
+    cmd_auth
+    ;;
+  disconnect|down)
+    cmd_disconnect
+    ;;
+  setup-creds)
+    exec "$ROOT/fhvpn-setup-creds"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

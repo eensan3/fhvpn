@@ -1,0 +1,6 @@
+# Copy to config.local and fill in. Do not commit config.local.
+
+VPN_SERVER=
+VPN_IP=
+VPN_AUTHGROUP=
+VPN_USER=

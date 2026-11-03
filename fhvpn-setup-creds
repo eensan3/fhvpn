@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Save VPN credentials to macOS Keychain for openconnect-sso autofill."""
+
+from __future__ import annotations
+
+import getpass
+import os
+import shlex
+import sys
+from pathlib import Path
+
+_pipx_site = Path.home() / ".local/pipx/venvs/openconnect-sso/lib"
+if _pipx_site.is_dir():
+    for site in sorted(_pipx_site.glob("python*/site-packages"), reverse=True):
+        sys.path.insert(0, str(site))
+        break
+
+import keyring
+import toml
+
+APP = "openconnect-sso"
+ROOT = Path(__file__).resolve().parent
+LOCAL_CFG = ROOT / "config.local"
+CONFIG_DIR = Path.home() / ".config" / "openconnect-sso"
+CONFIG_PATH = CONFIG_DIR / "config.toml"
+
+
+def load_local() -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not LOCAL_CFG.is_file():
+        return out
+    for raw in LOCAL_CFG.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        try:
+            parsed = shlex.split(val, posix=True)
+            out[key] = parsed[0] if parsed else ""
+        except ValueError:
+            out[key] = val.strip().strip('"').strip("'")
+    return out
+
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        with CONFIG_PATH.open() as f:
+            return toml.load(f)
+    local = load_local()
+    return {
+        "default_profile": {
+            "address": local.get("VPN_SERVER", ""),
+            "user_group": local.get("VPN_AUTHGROUP", ""),
+            "name": local.get("VPN_AUTHGROUP") or local.get("VPN_SERVER") or "default",
+        }
+    }
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with CONFIG_PATH.open("w") as f:
+        toml.dump(cfg, f)
+
+
+def main() -> int:
+    local = load_local()
+    if not local.get("VPN_SERVER"):
+        print(
+            f"Missing {LOCAL_CFG}\nCopy config.local.example → config.local and fill values",
+            file=sys.stderr,
+        )
+        return 1
+
+    cfg = load_config()
+    current = (
+        local.get("VPN_USER")
+        or cfg.get("credentials", {}).get("username", "")
+        or os.environ.get("VPN_USER", "")
+    )
+
+    print("Save credentials to Keychain (openconnect-sso autofill)\n")
+
+    username = input(f"Email / username [{current}]: ").strip() or current
+    if not username:
+        print("Username required.", file=sys.stderr)
+        return 1
+
+    password = getpass.getpass("Password: ")
+    if not password:
+        print("Password required.", file=sys.stderr)
+        return 1
+
+    keyring.set_password(APP, username, password)
+    try:
+        keyring.delete_password(APP, f"totp/{username}")
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+    server = local.get("VPN_SERVER", "")
+    group = local.get("VPN_AUTHGROUP", "")
+    cfg.setdefault("default_profile", {})
+    if server:
+        cfg["default_profile"]["address"] = server
+    if group:
+        cfg["default_profile"]["user_group"] = group
+        cfg["default_profile"]["name"] = group
+    elif server:
+        cfg["default_profile"]["name"] = server
+    cfg["credentials"] = {"username": username}
+    save_config(cfg)
+
+    # Keep config.local email in sync
+    lines = []
+    for raw in LOCAL_CFG.read_text(encoding="utf-8").splitlines():
+        if raw.strip().startswith("VPN_USER="):
+            lines.append(f"VPN_USER={shlex.quote(username)}")
+        else:
+            lines.append(raw)
+    if not any(l.strip().startswith("VPN_USER=") for l in lines):
+        lines.append(f"VPN_USER={shlex.quote(username)}")
+    LOCAL_CFG.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print(f"\nSaved. Username {username} in Keychain.")
+    print("Connect: ./fhvpn")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
