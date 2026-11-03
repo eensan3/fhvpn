@@ -20,6 +20,16 @@ cp config.local.example config.local
 ./fhvpn
 ```
 
+## Alias
+
+From the repo directory (zsh/bash):
+
+```bash
+echo "alias fhvpn='$(pwd)/fhvpn'" >> ~/.zshrc && source ~/.zshrc
+```
+
+For bash use `~/.bashrc` instead of `~/.zshrc`.
+
 ## Commands
 
 ```bash
